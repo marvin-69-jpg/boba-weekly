@@ -1,0 +1,6 @@
+[project]
+name = "boba-weekly"
+version = "0.1.0"
+description = "BOBA 週報 — YouTube 影片逐字稿產出工具"
+requires-python = ">=3.12"
+dependencies = []
