@@ -68,65 +68,66 @@ def raw_paths_for_week(week: str) -> list[Path]:
 # ────────────────────────── Commands ──────────────────────────
 
 def cmd_candidates(week: str):
-    """掃本週 raw 日報,列出最常被提到的 wiki entity 作為候選新聞。"""
-    raws = raw_paths_for_week(week)
-    if not raws:
-        print(f"❌ 本週 ({week}) 沒找到任何 raw 日報")
-        print(f"   預期位置:{WIKI_ROOT}/raw/YYYY/MM/DD.md")
+    """掃 wiki entity 的 Key Events,找本週有事發生的 entity 作為候選新聞。"""
+    dates = week_dates(week)
+    date_strs = {d.strftime("%Y-%m-%d") for d in dates}
+
+    wiki_dir = WIKI_ROOT / "wiki"
+    if not wiki_dir.exists():
+        print(f"❌ wiki 目錄不存在:{wiki_dir}")
         sys.exit(1)
 
-    print(f"📅 掃描本週 ({week}) 的 {len(raws)} 篇日報 ...\n")
-
-    # Count wiki entity references across the week's raw reports
-    slug_hits: Counter[str] = Counter()
-    slug_contexts: dict[str, list[str]] = {}  # slug → up to 3 short mentions
-
-    for raw_path in raws:
-        text = raw_path.read_text(encoding="utf-8")
-        # Match [[wiki/<slug>|Label]] or [[wiki/<slug>]]
-        for m in re.finditer(r"\[\[wiki/([^\]\|]+?)(?:\|[^\]]+)?\]\]", text):
-            slug = m.group(1).rstrip("\\").strip()
-            slug_hits[slug] += 1
-            if len(slug_contexts.get(slug, [])) < 3:
-                # Grab ~80 chars around the mention for flavour
-                start = max(0, m.start() - 40)
-                end = min(len(text), m.end() + 40)
-                snippet = text[start:end].replace("\n", " ").strip()
-                slug_contexts.setdefault(slug, []).append(snippet)
-
-    if not slug_hits:
-        print("❌ 本週日報沒有任何 wiki entity 引用")
-        sys.exit(1)
-
-    # Enrich with wiki page metadata
     entries = []
-    for slug, hits in slug_hits.items():
-        wiki_page = WIKI_ROOT / "wiki" / f"{slug}.md"
-        summary, events, related = "", 0, 0
-        if wiki_page.exists():
-            content = wiki_page.read_text(encoding="utf-8")
-            # Try to grab the first non-empty line as summary
-            for line in content.splitlines():
-                s = line.strip()
-                if s and not s.startswith("#") and not s.startswith("---"):
-                    summary = s[:80]
-                    break
-            events = len(re.findall(r"\*\*\d{4}-\d{2}-\d{2}\*\*", content))
-            related_section = content.split("## Related")[-1] if "## Related" in content else ""
-            related = len(re.findall(r"\[\[", related_section))
+    for wiki_page in wiki_dir.glob("*.md"):
+        content = wiki_page.read_text(encoding="utf-8")
+        # Find Key Events with dates falling inside this week
+        this_week_dates = [
+            m.group(1)
+            for m in re.finditer(r"\*\*(\d{4}-\d{2}-\d{2})\*\*", content)
+            if m.group(1) in date_strs
+        ]
+        if not this_week_dates:
+            continue
+
+        slug = wiki_page.stem
+        # Summary = first non-heading non-frontmatter non-empty line
+        summary = ""
+        in_frontmatter = False
+        for line in content.splitlines():
+            s = line.strip()
+            if s == "---":
+                in_frontmatter = not in_frontmatter
+                continue
+            if in_frontmatter or not s or s.startswith("#"):
+                continue
+            summary = s[:80]
+            break
+
+        total_events = len(re.findall(r"\*\*\d{4}-\d{2}-\d{2}\*\*", content))
+        related_section = content.split("## Related")[-1] if "## Related" in content else ""
+        related = len(re.findall(r"\[\[", related_section))
+
+        # Most recent event date within the week
+        last_event = max(this_week_dates) if this_week_dates else ""
+
         entries.append({
             "slug": slug,
-            "hits": hits,
-            "summary": summary or "(wiki page 未建立)",
-            "events": events,
+            "this_week": len(this_week_dates),
+            "summary": summary or "(無摘要)",
+            "total_events": total_events,
             "related": related,
-            # Score: this-week mentions dominate; wiki depth is tiebreaker
-            "score": hits * 10 + events + related,
+            "last_event": last_event,
+            # Score: this-week event count dominates; total depth is tiebreaker
+            "score": len(this_week_dates) * 10 + total_events + related,
         })
 
-    entries.sort(key=lambda e: e["score"], reverse=True)
+    if not entries:
+        print(f"❌ 本週 ({week}) 沒有任何 wiki entity 的 Key Events")
+        print(f"   可能本週 boba-wiki 還沒 ingest,先跑 wiki 的 ingest.sh")
+        sys.exit(1)
 
-    # Check what's already drafted / published
+    entries.sort(key=lambda e: (e["score"], e["last_event"]), reverse=True)
+
     draft_path = DRAFTS / f"{week}.md"
     episode_path = EPISODES / f"{week}.md"
     week_status = (
@@ -135,21 +136,22 @@ def cmd_candidates(week: str):
         else ""
     )
 
-    print(f"📊 {week} 候選新聞(依本週提及次數排序)")
+    raws = raw_paths_for_week(week)
+    print(f"📊 {week} 候選新聞(wiki 本週有更新的 entity)")
+    print(f"   掃描範圍:{dates[0]} ~ {dates[-1]}(ISO week {week}),raw 日報 {len(raws)}/7 篇")
     if week_status:
-        print(f"   {week_status}\n")
-    else:
-        print()
-    print(f"{'#':>3}  {'Score':>5}  {'Hits':>4}  {'Events':>6}  {'Links':>5}  Slug — Summary")
-    print("─" * 110)
+        print(f"   {week_status}")
+    print()
+    print(f"{'#':>3}  {'Score':>5}  {'本週事件':>8}  {'總事件':>6}  {'Links':>5}  最新  Slug — Summary")
+    print("─" * 120)
 
     for i, e in enumerate(entries[:8], 1):
         print(
-            f"{i:>3}  {e['score']:>5}  {e['hits']:>4}  {e['events']:>6}  {e['related']:>5}  "
-            f"{e['slug']} — {e['summary']}"
+            f"{i:>3}  {e['score']:>5}  {e['this_week']:>8}  {e['total_events']:>6}  "
+            f"{e['related']:>5}  {e['last_event'][-5:]:>5}  {e['slug']} — {e['summary']}"
         )
 
-    print(f"\n共 {len(entries)} 個 entity 本週被提到,顯示 top 8。")
+    print(f"\n共 {len(entries)} 個 entity 本週有事,顯示 top 8。")
     print(f"\n下一步:挑 3-5 個 slug,執行:")
     print(f"  uv run python3 cli.py research {week} slug1,slug2,slug3")
 
@@ -197,30 +199,31 @@ def cmd_research(week: str, slugs_csv: str):
                     lines.append(f"\n### {rs}\n")
                     lines.append(rpath.read_text(encoding="utf-8"))
 
-        # This week's raw snippets that mention this slug
-        week_mentions = []
-        for p, text in raw_texts.items():
-            if re.search(rf"\[\[wiki/{re.escape(slug)}(?:\||\])", text):
-                week_mentions.append((p, text))
-        if week_mentions:
-            lines.append(f"\n## 本週日報中的提及 ({len(week_mentions)} 篇)\n")
-            for p, text in week_mentions:
-                lines.append(f"\n### {p.relative_to(WIKI_ROOT)}\n")
-                lines.append(text)
-
         out_path = week_data / f"{slug}.md"
         out_path.write_text("\n".join(lines), encoding="utf-8")
         total_chars = sum(len(l) for l in lines)
-        results.append((slug, out_path, total_chars, len(related_slugs), len(week_mentions)))
+        results.append((slug, out_path, total_chars, len(related_slugs)))
+
+    # Also dump the whole week's raw reports once, shared across slugs
+    if raw_texts:
+        shared_raw = week_data / "_raw_week.md"
+        raw_lines = [f"# Week {week} Raw Daily Reports\n"]
+        for p in sorted(raw_texts):
+            raw_lines.append(f"\n## {p.relative_to(WIKI_ROOT)}\n")
+            raw_lines.append(raw_texts[p])
+        shared_raw.write_text("\n".join(raw_lines), encoding="utf-8")
 
     if not results:
         print("❌ 沒有任何 slug 產出 research notes")
         sys.exit(1)
 
     print(f"\n✅ 產出 {len(results)} 份 research notes 到 {week_data.relative_to(ROOT)}/\n")
-    for slug, path, chars, rel, weekref in results:
-        print(f"   {slug}: {chars:,} chars | related={rel} | 本週提及={weekref} 篇")
-    print(f"\n下一步:Claude 讀 research + prompts/ → 寫 drafts/{week}.md")
+    for slug, path, chars, rel in results:
+        print(f"   {slug}: {chars:,} chars | related={rel}")
+    if raw_texts:
+        shared_raw = week_data / "_raw_week.md"
+        print(f"   _raw_week.md: 本週 {len(raw_texts)} 篇日報全文({shared_raw.stat().st_size:,} bytes)")
+    print(f"\n下一步:Claude 讀 research + _raw_week.md + prompts/ → 寫 drafts/{week}.md")
     print(f"  uv run python3 cli.py draft {week} {slugs_csv}")
 
 
